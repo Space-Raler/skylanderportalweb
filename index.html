@@ -228,7 +228,7 @@ const LOCAL = "local", SENDING = "sending", CONFIRMED = "confirmed", ERROR = "er
 class Session {
   constructor(transport, onLog = () => {}, onSave = () => {}) {
     this.transport = transport; this.onLog = onLog; this.onSave = onSave;
-    this.placed = new Map(); this.state = new Map();
+    this.placed = new Map(); this.state = new Map(); this.flipperSlots = new Set(); this.holding = new Set();
     this.link = "disconnected"; this.linkDetail = ""; this.usb = null; this.game = null; this.problem = null;
     this.saves = 0; this.frames = 0; this.writeBack = true; this.synced = false; this.rejected = false; this.parser = new Parser();
     this.bind(transport);
@@ -268,7 +268,12 @@ class Session {
     this.placed.set(slot, fig);
     if (this.connected) {
       this.state.set(slot, SENDING);
-      if (this.synced) this.send(P.load(slot, fig.data));
+      if (this.synced) {
+        if (replaced || this.flipperSlots.has(slot)) {   // the game only notices a new figure if the slot is seen empty first
+          this.send(P.remove(slot)); this.holding.add(slot);
+          setTimeout(() => { this.holding.delete(slot); if (this.placed.get(slot) === fig && this.connected && this.synced) this.send(P.load(slot, fig.data)); }, 700);
+        } else this.send(P.load(slot, fig.data));
+      }
     } else this.state.set(slot, LOCAL);
     const where = this.slotName(slot);
     this.onLog(`${figLabel(fig)} -> ${where}` + (replaced ? ` (replacing ${figLabel(replaced)})` : ""));
@@ -304,7 +309,7 @@ class Session {
     if (this.connected && this.synced) this.send(P.clear());
     this.onLog("Portal cleared"); this.changed();
   }
-  resetLinkState() { this.usb = null; this.game = null; this.synced = false; this.rejected = false; this.parser = new Parser(); }
+  resetLinkState() { this.flipperSlots = new Set(); this.holding = new Set(); this.usb = null; this.game = null; this.synced = false; this.rejected = false; this.parser = new Parser(); }
   setTransport(t) {
     try { this.transport.disconnect(); } catch (e) {}
     this.transport = t; this.bind(t);
@@ -344,14 +349,14 @@ class Session {
       if (f.type === MSG.RESULT && f.payload.length >= 3 && [MSG.DUMP_READ, MSG.DUMP_WRITE_END].includes(f.payload[0])) { if (this.onFileFrame) this.onFileFrame(f); return; }
       if (f.type === MSG.STATUS) {
         if (f.payload.length && f.payload[0] !== VERSION) return this.wrongApp(f.payload[0]);
-        const st = P.parseStatus(f.payload);
+        const st = P.parseStatus(f.payload); this.flipperSlots = new Set(st.present);
         this.usb = st.usb; this.game = st.game < GAME_NAMES.length ? st.game : null;
         if (!this.synced) { this.synced = true; this.syncAll(); return; }
         for (const slot of [...this.placed.keys()]) {
           const fig = this.placed.get(slot);
-          if (this.state.get(slot) === CONFIRMED && !st.present.has(slot)) {
+          if (this.state.get(slot) === CONFIRMED && !st.present.has(slot) && !this.holding.has(slot)) {
             this.onLog(`${figLabel(fig)} was removed on the Flipper`); this.placed.delete(slot); this.state.delete(slot);
-          } else if (this.state.get(slot) === SENDING && st.present.has(slot)) this.state.set(slot, CONFIRMED);
+          } else if (this.state.get(slot) === SENDING && st.present.has(slot) && !this.holding.has(slot)) this.state.set(slot, CONFIRMED);
         }
       } else if (f.type === MSG.RESULT) {
         const r = P.parseResult(f.payload);
